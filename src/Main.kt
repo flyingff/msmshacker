@@ -48,6 +48,7 @@ class FieldGetter(
                             j * rect.width / w, i * rect.height / h, cellW, cellH)
                     fieldArray[j][i] = if( subImage.find(colorUncovered)) {
                         subImage.extract(colorList)
+                        subImage.cut(0x0)?.save("D:\\i\\$i$j.png")
                         0
                     } else {
                         -1
@@ -97,4 +98,25 @@ fun BufferedImage.extract(color : Array<Int>, dest : Int = 0xFFFFFF, threshold: 
                     })
                 }
         }
+}
+
+fun BufferedImage.cut(color : Int) : BufferedImage? {
+    var minX = Int.MAX_VALUE
+    var maxX = Int.MIN_VALUE
+    var minY = Int.MAX_VALUE
+    var maxY = Int.MIN_VALUE
+    (0..width - 1).forEach { i ->
+        (0..height - 1)
+                .forEach {
+                    if(color == getRGB(i, it).and(0xFFFFFF)) {
+                        minX = minOf(i, minX)
+                        maxX = maxOf(i, maxX)
+                        minY = minOf(it, minY)
+                        maxY = maxOf(it, maxY)
+                    }
+                }
+    }
+    if(minX == Int.MAX_VALUE) return null
+    return getSubimage(minX, minY, maxX - minX, maxY - minY)
+
 }
