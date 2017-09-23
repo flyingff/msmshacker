@@ -7,6 +7,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import java.util.*
 import javax.imageio.ImageIO
+import kotlin.collections.HashSet
 
 val colorUncovered = 0x50371b
 val colorList = arrayOf(
@@ -21,6 +22,10 @@ val colorList = arrayOf(
 fun main(args : Array<String>) {
     Thread.sleep(1000)
     val field = FieldOperator(rect = Rectangle(291, 187, 1627 - 291, 896 - 187))
+    Block.fieldGetter = { x,y-> field[x][y] }
+    Block.opener = field::open
+    Block.flagger = field::flag
+
     AutoMiner(field).work()
 }
 
@@ -42,37 +47,52 @@ class FieldOperator(
         private set
 
     operator fun get(w : Int) = fieldArray[w]
-    fun open(x : Int, y : Int) {
-        if(isOver) return
+
+    private fun moveTo(x: Int, y: Int) {
         val cellW = rect.width / w
         val cellH = rect.height / h
         r.mouseMove(rect.x + x * rect.width / w + cellW / 2, rect.y + y * rect.height / h + cellH / 2)
         r.delay(10)
-        r.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+    }
+    private fun click(button : Int) {
+        r.mousePress(button)
         r.delay(20)
-        r.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+        r.mouseRelease(button)
         r.delay(10)
-
+    }
+    fun open(x : Int, y : Int) {
+        if(isOver) return
+        moveTo(x, y)
+        click(InputEvent.BUTTON1_DOWN_MASK)
         updateQueue.addLast(Pair(x, y))
+    }
+    fun flag(x : Int, y : Int) {
+        if(isOver || fieldArray[x][y] != -1) return
+        //moveTo(x, y)
+        //click(InputEvent.BUTTON3_DOWN_MASK)
+        fieldArray[x][y] = -2
     }
 
 
-    fun update() {
-        if(isOver) return
+    fun update() : Set<Block> {
+        if(isOver) return emptySet()
 
         val img = r.createScreenCapture(rect)
         if(img.getRGB(573 - rect.x, 778 - rect.y).and(0xFFFFFF) == 0) {
             isOver = true
-            return
+            return emptySet()
         }
+        val ret = HashSet<Block>()
+
         while (updateQueue.isNotEmpty()) {
             val (x,y) = updateQueue.pollFirst()
-            if(fieldArray[x][y] >= 0) {
+            if(fieldArray[x][y] != -1) {
                 continue
             }
             val newValue = recognizeOne(img, x, y)
             if(newValue != fieldArray[x][y]) {
                 fieldArray[x][y] = newValue
+                ret.add(Block(x, y))
                 for(dx in -1..1) {
                     for(dy in -1..1) {
                         if(dx == 0 && dy == 0) continue
@@ -85,6 +105,7 @@ class FieldOperator(
                 }
             }
         }
+        return ret
     }
 
     private fun recognizeOne(img: BufferedImage, x: Int, y: Int) : Int{
@@ -108,6 +129,7 @@ class FieldOperator(
 
     @Suppress("unused")
     fun print() {
+        println("-------------------------------------------------------------------------")
         for(i in 0..h - 1) {
             for(j in 0..w - 1) {
                 print(when (this[j][i]){
@@ -118,6 +140,7 @@ class FieldOperator(
             }
             println()
         }
+        println("=========================================================================")
     }
 }
 
@@ -220,12 +243,137 @@ class AutoMiner (
 
         operator.open(x, y)
         Thread.sleep(500)
-        operator.update()
+        val edgeBlocks = HashSet<Block>()
+        edgeBlocks.addAll(operator.update().filter { it.isEdge })
         // begin operation loop
-        while (!operator.isOver) {
+        var hasOperation = true
+        while (!operator.isOver && hasOperation) {
+            hasOperation = false
+            edgeBlocks.forEach outer@{
+                if(it.coveredAdjacent.size == it.remainingMines) {
+                    it.coveredAdjacent.forEach {
+                        it.flag()
+                        hasOperation = true
+                    }
+                }
+                if(it.remainingMines == 0) {
+                    it.coveredAdjacent.forEach {
+                        it.open()
+                        hasOperation = true
+                    }
+                } else {
+                    it.edgeAdjacent.forEach { adj->
+                        val covered1 = it.coveredAdjacent
+                        val covered2 = adj.coveredAdjacent
+                        val intersect = HashSet<Block>(covered1)
+                        intersect.retainAll(covered2)
+                        if(intersect.isEmpty()) return@forEach
+                        if(covered1.containsAll(covered2)) {
+                            if(it.remainingMines == adj.remainingMines) {
+                                covered1.removeAll(intersect)
+                                covered1.forEach { it.open(); hasOperation = true }
+                            } else if(it.remainingMines - adj.remainingMines == covered1.size - covered2.size) {
+                                covered1.removeAll(intersect)
+                                covered1.forEach { it.flag(); hasOperation = true }
+                            }
+                        } else if (covered1.size - intersect.size == it.remainingMines - adj.remainingMines) {
+                            covered1.removeAll(intersect)
+                            covered1.forEach { it.flag(); hasOperation = true }
+                        }
+                    }
+                }
+            }
 
+            if(!hasOperation) {
+                val avaials = edgeBlocks.flatMap { it.coveredAdjacent }
+                if(avaials.isNotEmpty()) {
+                    avaials[(avaials.size * Math.random()).toInt()].open()
+                    println("瞎猜一个")
+                    hasOperation = true
+                }
+            }
+
+            Thread.sleep(350)
+            edgeBlocks.addAll(operator.update())
+            edgeBlocks.removeIf { !it.isEdge }
         }
-        operator.print()
+    }
+}
+data class Block(
+        val x : Int,
+        val y : Int
+) {
+    companion object {
+        val w : Int = 30
+        val h : Int = 16
+        lateinit var fieldGetter : (Int, Int) -> Int
+        lateinit var flagger : (Int, Int) -> Unit
+        lateinit var opener : (Int, Int) -> Unit
+    }
+    private inline fun forEachAdjacent(fn : (Int, Int)->Unit) {
+        for(i in -1..1) {
+            for (j in -1..1) {
+                if (i == 0 && j == 0) continue
+                val nx = x + i
+                val ny = y + j
+                if (nx !in 0..(w - 1) || ny !in 0..(h - 1)) {
+                    continue
+                }
+                fn(nx, ny)
+            }
+        }
     }
 
+    val remainingMines: Int get() = fieldGetter(x, y) - flaggedCnt
+    val coveredAdjacent : MutableSet<Block> get() {
+        val ret = HashSet<Block>()
+        forEachAdjacent { nx, ny ->
+            if(fieldGetter(nx, ny) == -1) {
+                ret.add(Block(nx, ny))
+            }
+        }
+        return ret
+    }
+    val flaggedCnt : Int get() {
+        var ret = 0
+        forEachAdjacent { nx, ny ->
+            if(fieldGetter(nx, ny) == -2) {
+                ret++
+            }
+        }
+        return ret
+    }
+    val edgeAdjacent: MutableSet<Block> get() {
+        val ret = HashSet<Block>()
+        forEachAdjacent { nx, ny ->
+            val b = Block(nx, ny)
+            if(b.isEdge) {
+                ret.add(Block(nx, ny))
+            }
+        }
+        return ret
+    }
+    val isEdge : Boolean get() {
+        if(fieldGetter(x, y) !in 1..8) return false
+        forEachAdjacent { nx, ny ->
+            if(fieldGetter(nx, ny) == -1) {
+                return true
+            }
+        }
+        return false
+    }
+
+    @Suppress("unused")
+    val isFlagged : Boolean get() = fieldGetter(x, y) == -2
+
+    fun flag() {
+        flagger(x, y)
+    }
+    fun open() {
+        opener(x,y)
+    }
+
+    override fun toString(): String {
+        return "($x, $y)"
+    }
 }
